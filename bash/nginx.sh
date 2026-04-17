@@ -102,7 +102,7 @@ function remove_host_machine_nginx() {
         return 1
     fi
 
-    local nginx_file_name="${ENV}_${APP_NAME}.conf"
+    local nginx_file_name="${ENV}_${APP_NAME}_${REDIS_PORT}.conf"
 
     # ✅ Correct path for stream configs
     local config_path="/etc/nginx/stream-conf.d/${nginx_file_name}"
@@ -152,7 +152,7 @@ function set_up_host_machine_nginx() {
         return 1
     fi
 
-    local nginx_file_name="${ENV}_${APP_NAME}.conf"
+    local nginx_file_name="${ENV}_${APP_NAME}_${REDIS_PORT}.conf"
     local template_path="./bash/reverse_proxy.conf"
     local destination_path="/etc/nginx/stream-conf.d/${nginx_file_name}"
 

@@ -1,213 +1,262 @@
 #!/bin/bash
 
-    function get_selection() {
-        local options=("$@")
-        local selected_value=0
-        PS3='Enter your choice: '
+function get_login_user() {
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        echo "$SUDO_USER"
+    elif [ -n "${USER:-}" ] && [ "${USER}" != "root" ]; then
+        echo "$USER"
+    else
+        id -un
+    fi
+}
 
-        select opt in "${options[@]}"
-        do
-            if [[ -n $opt ]]; then
-                selected_value=$opt
-                break
-            fi
-        done
-        echo $selected_value
-    }
+function get_selection() {
+    local options=("$@")
+    local selected_value=""
+    local opt
 
-    function handle_error() {
-        local exit_code=$1
-        local error_message=$2
-        if [ $exit_code -ne 0 ]; then
-            display "error" "Error: $error_message (Exit code: $exit_code)"
-            exit $exit_code
+    # One option per line — default select is multi-column and hard to scan
+    local old_columns="${COLUMNS:-}"
+    COLUMNS=1
+    PS3=$'\nEnter number: '
+
+    select opt in "${options[@]}"
+    do
+        if [[ -n $opt ]]; then
+            selected_value=$opt
+            break
         fi
-    }
+        display "warning" "Invalid choice. Enter a number from the list."
+    done
 
-    function show_heading(){
-        echo -e "\033[0;36m╔═══════════════════════════════════════════════════════════════════╗\033[0m"
-        echo -e "\033[0;36m║ \033[0;32m=> $1\033[0;36m                                                       ║\033[0m"
-        echo -e "\033[0;36m╚═══════════════════════════════════════════════════════════════════╝\033[0m"
-    }
+    if [ -n "$old_columns" ]; then
+        COLUMNS="$old_columns"
+    else
+        unset COLUMNS
+    fi
 
-    function display(){
-        local color_scheme=("danger" "success" "warning" "info")
-        local type=$1
-        local message=$2
+    printf '%s\n' "$selected_value"
+}
 
-        if [ "$type" = "${color_scheme[0]}" ]; then
-            echo -e "\033[0;31m$message\033[0m" #red
-        elif [ "$type" = "${color_scheme[1]}" ]; then
-            echo -e "\033[0;32m$message\033[0m" #green
-        elif [ "$type" = "${color_scheme[2]}" ]; then
-            echo -e "\033[0;33m$message\033[0m" #yellow
-        elif [ "$type" = "${color_scheme[3]}" ]; then
-            echo -e "\033[0;34m$message\033[0m" #blue
-        else
+function handle_error() {
+    local exit_code=$1
+    local error_message=$2
+    if [ "$exit_code" -ne 0 ]; then
+        display "error" "Error: $error_message (Exit code: $exit_code)"
+        exit "$exit_code"
+    fi
+}
+
+function show_heading() {
+    local title="=> $1"
+    local width=67
+    local pad
+    pad=$((width - ${#title} - 1))
+    if [ "$pad" -lt 1 ]; then
+        pad=1
+    fi
+    local spaces
+    spaces="$(printf '%*s' "$pad" '')"
+
+    echo ""
+    echo -e "\033[0;36m╔═══════════════════════════════════════════════════════════════════╗\033[0m"
+    echo -e "\033[0;36m║ \033[0;32m${title}\033[0;36m${spaces}║\033[0m"
+    echo -e "\033[0;36m╚═══════════════════════════════════════════════════════════════════╝\033[0m"
+}
+
+# Compact summary so operators see which project they are acting on
+function show_project_context() {
+    echo ""
+    display "info" "Project : ${ENV:-?} / ${APP_NAME:-?}"
+    display "info" "Redis   : port ${REDIS_PORT:-?}  maxmemory ${REDIS_MAXMEMORY:-?}  image redis:${REDIS_VERSION:-?}"
+}
+
+function display() {
+    local type=$1
+    local message=$2
+
+    case "$type" in
+        danger|error)
+            echo -e "\033[0;31m$message\033[0m"
+            ;;
+        success)
+            echo -e "\033[0;32m$message\033[0m"
+            ;;
+        warning)
+            echo -e "\033[0;33m$message\033[0m"
+            ;;
+        info)
+            echo -e "\033[0;34m$message\033[0m"
+            ;;
+        *)
             echo "$message"
-        fi
-    }
+            ;;
+    esac
+}
 
-    function get_user_choice() {
-        local choice
-        while true; do
-            read -p "Please enter yes or no: " choice
-            case "$choice" in
-                [Yy][Ee][Ss]|[Yy])
-                    return 0  # true
-                    ;;
-                [Nn][Oo]|[Nn])
-                    return 1  # false
-                    ;;
-                *)
-                    echo "Invalid input. Please enter yes or no."
-                    ;;
-            esac
-        done
-    }
-
-    function read_env_file() {
-        # Get the ENV from the .env file
-        if [ -f .env ]; then
-            source .env
-        else
-            display "danger" ".env file not found!"
-            exit 1
-        fi
-
-        # Set the variables globally
-        COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
-        APP_NAME=$APP_NAME
-        ENV=$ENV
-        CONTAINER_PORT=$CONTAINER_PORT
-        HOST_URL=$HOST_URL
-        HOST_PORT=$HOST_PORT
-        ENABLE_CRON=$ENABLE_CRON
-        ENABLE_JOBS=$ENABLE_JOBS
-        PHP_VERSION=$PHP_VERSION
-        PHP_MEMORY_LIMIT=$PHP_MEMORY_LIMIT
-        PHP_UPLOAD_MAX_FILESIZE=$PHP_UPLOAD_MAX_FILESIZE
-        PHP_POST_MAX_SIZE=$PHP_POST_MAX_SIZE
-        PHP_MAX_EXECUTION_TIME=$PHP_MAX_EXECUTION_TIME
-        ENABLE_MONGODB_EXTENSION=$ENABLE_MONGODB_EXTENSION
-        ENABLE_MONGODB_EXTENSION_VERSION=$ENABLE_MONGODB_EXTENSION_VERSION
-    }
-
-    # Function to set up swap memory
-    function setup_swap_memory() {
-        # Add function description and parameters documentation
-        local SWAP_SIZE
-        local SWAP_FILE="/swapfile"
-        local SWAPPINESS=10  # Make swappiness configurable
-
-        # Validate root privileges first
-        if [ "$EUID" -ne 0 ] && ! sudo -v; then
-            display "error" "This function requires sudo privileges"
-            return 1
-        fi
-
-        # Get and validate swap size input
-        while true; do
-            read -p "Enter the swap size (e.g., 1G, 2G, 512M): " SWAP_SIZE
-            if [[ $SWAP_SIZE =~ ^[0-9]+[MG]$ ]]; then
-                break
-            else
-                display "error" "Invalid input. Please enter the swap size in the format like '2G' for 2 GB or '512M' for 512 MB."
-            fi
-        done
-
-        # Check if swap is already enabled
-        if sudo swapon --show | grep -q "${SWAP_FILE}"; then
-            display "warning" "Swap space is already enabled."
-            return 0
-        fi
-
-        # Check available disk space before proceeding
-        local REQUIRED_SPACE=$(echo "$SWAP_SIZE" | sed 's/[MG]//')
-        local AVAILABLE_SPACE=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-
-        if [ "${SWAP_SIZE: -1}" = "G" ] && [ "$AVAILABLE_SPACE" -lt "$REQUIRED_SPACE" ]; then
-            display "error" "Not enough disk space. Required: ${REQUIRED_SPACE}G, Available: ${AVAILABLE_SPACE}G"
-            return 1
-        fi
-
-        # Create swap file with error handling
-        display "info" "Creating swap file of size ${SWAP_SIZE}..."
-        if ! sudo fallocate -l "$SWAP_SIZE" "$SWAP_FILE"; then
-            display "info" "fallocate failed, trying dd method..."
-            if ! sudo dd if=/dev/zero of="$SWAP_FILE" bs=1M count=$(echo "$SWAP_SIZE" | sed 's/[MG]//')"000"; then
-                display "error" "Failed to create swap file"
+function get_user_choice() {
+    local choice
+    while true; do
+        read -r -p "Please enter yes or no: " choice
+        case "$choice" in
+            [Yy][Ee][Ss]|[Yy])
+                return 0
+                ;;
+            [Nn][Oo]|[Nn])
                 return 1
+                ;;
+            *)
+                echo "Invalid input. Please enter yes or no."
+                ;;
+        esac
+    done
+}
+
+# Load KEY=VALUE pairs without shell-sourcing (.env is not executed).
+function read_env_file() {
+    if [ ! -f .env ]; then
+        display "danger" ".env file not found!"
+        exit 1
+    fi
+
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            value="${BASH_REMATCH[2]}"
+
+            if [[ "$value" =~ ^\"(.*)\"$ ]]; then
+                value="${BASH_REMATCH[1]}"
+            elif [[ "$value" =~ ^\'(.*)\'$ ]]; then
+                value="${BASH_REMATCH[1]}"
             fi
-        fi
 
-        # Set permissions and initialize swap
-        if ! sudo chmod 600 "$SWAP_FILE"; then
-            display "error" "Failed to set swap file permissions"
-            return 1
+            printf -v "$key" '%s' "$value"
+            export "$key"
         fi
+    done < .env
+}
 
-        if ! sudo mkswap "$SWAP_FILE"; then
-            display "error" "Failed to initialize swap file"
-            return 1
-        fi
+function setup_swap_memory() {
+    local SWAP_SIZE
+    local SWAP_FILE="/swapfile"
+    local SWAPPINESS=10
 
-        if ! sudo swapon "$SWAP_FILE"; then
-            display "error" "Failed to enable swap"
-            return 1
-        fi
+    if [ "$EUID" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+        display "error" "This function requires passwordless sudo (the EC2 login user, e.g. ubuntu, normally has this)."
+        return 1
+    fi
 
-        # Update /etc/fstab if needed
-        if ! grep -q "$SWAP_FILE" /etc/fstab; then
-            echo "$SWAP_FILE none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
-            if [ $? -ne 0 ]; then
-                display "error" "Failed to update /etc/fstab"
-                return 1
-            fi
-        fi
-
-        # Configure swappiness
-        if ! sudo sysctl vm.swappiness=$SWAPPINESS; then
-            display "warning" "Failed to set immediate swappiness"
-        fi
-
-        if ! grep -q "vm.swappiness" /etc/sysctl.conf; then
-            echo "vm.swappiness=$SWAPPINESS" | sudo tee -a /etc/sysctl.conf >/dev/null
-            if [ $? -ne 0 ]; then
-                display "warning" "Failed to set permanent swappiness"
-            fi
-        fi
-
-        # Verify setup
-        if sudo swapon --show | grep -q "$SWAP_FILE"; then
-            display "success" "Swap setup complete! Size: ${SWAP_SIZE}, Swappiness: ${SWAPPINESS}"
-            return 0
+    while true; do
+        read -r -p "Enter the swap size (e.g., 1G, 2G, 512M): " SWAP_SIZE
+        if [[ $SWAP_SIZE =~ ^[0-9]+[MG]$ ]]; then
+            break
         else
-            display "error" "Swap setup verification failed"
+            display "error" "Invalid input. Please enter the swap size in the format like '2G' for 2 GB or '512M' for 512 MB."
+        fi
+    done
+
+    if sudo swapon --show | grep -q "${SWAP_FILE}"; then
+        display "warning" "Swap space is already enabled."
+        return 0
+    fi
+
+    local unit="${SWAP_SIZE: -1}"
+    local size_num="${SWAP_SIZE%?}"
+    local required_mb
+    if [ "$unit" = "G" ]; then
+        required_mb=$((size_num * 1024))
+    else
+        required_mb=$size_num
+    fi
+
+    local available_mb
+    available_mb=$(df -BM / | awk 'NR==2 {print $4}' | sed 's/M//')
+    if [ "$available_mb" -lt "$required_mb" ]; then
+        display "error" "Not enough disk space. Required: ${required_mb}M, Available: ${available_mb}M"
+        return 1
+    fi
+
+    if [ -f "$SWAP_FILE" ]; then
+        sudo swapoff "$SWAP_FILE" 2>/dev/null || true
+        sudo rm -f "$SWAP_FILE"
+    fi
+
+    display "info" "Creating swap file of size ${SWAP_SIZE}..."
+    if ! sudo fallocate -l "$SWAP_SIZE" "$SWAP_FILE"; then
+        display "info" "fallocate failed, trying dd method..."
+        if ! sudo dd if=/dev/zero of="$SWAP_FILE" bs=1M count="$required_mb"; then
+            display "error" "Failed to create swap file"
             return 1
         fi
-    }
+    fi
 
-    fix_memory_overcommit() {
-        CURRENT=$(sysctl -n vm.overcommit_memory)
+    if ! sudo chmod 600 "$SWAP_FILE"; then
+        display "error" "Failed to set swap file permissions"
+        return 1
+    fi
 
-        if [ "$CURRENT" -ne 1 ]; then
-            echo "Fixing vm.overcommit_memory..."
+    if ! sudo mkswap "$SWAP_FILE"; then
+        display "error" "Failed to initialize swap file"
+        return 1
+    fi
 
-            sudo sysctl -w vm.overcommit_memory=1
+    if ! sudo swapon "$SWAP_FILE"; then
+        display "error" "Failed to enable swap"
+        return 1
+    fi
 
-            # Persist after reboot
-            if ! grep -q "vm.overcommit_memory" /etc/sysctl.conf; then
-                echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf
-            else
-                sudo sed -i 's/^vm.overcommit_memory.*/vm.overcommit_memory = 1/' /etc/sysctl.conf
-            fi
-
-            sudo sysctl -p
-
-            echo "vm.overcommit_memory set to 1 ✅"
-        else
-            echo "vm.overcommit_memory already set ✅"
+    if ! grep -q "$SWAP_FILE" /etc/fstab; then
+        if ! echo "$SWAP_FILE none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null; then
+            display "error" "Failed to update /etc/fstab"
+            return 1
         fi
-    }
+    fi
 
+    if ! sudo sysctl vm.swappiness=$SWAPPINESS; then
+        display "warning" "Failed to set immediate swappiness"
+    fi
+
+    if ! grep -q "vm.swappiness" /etc/sysctl.conf; then
+        if ! echo "vm.swappiness=$SWAPPINESS" | sudo tee -a /etc/sysctl.conf >/dev/null; then
+            display "warning" "Failed to set permanent swappiness"
+        fi
+    fi
+
+    if sudo swapon --show | grep -q "$SWAP_FILE"; then
+        display "success" "Swap setup complete! Size: ${SWAP_SIZE}, Swappiness: ${SWAPPINESS}"
+        return 0
+    else
+        display "error" "Swap setup verification failed"
+        return 1
+    fi
+}
+
+function fix_memory_overcommit() {
+    local CURRENT
+    CURRENT=$(sysctl -n vm.overcommit_memory)
+
+    if [ "$CURRENT" -ne 1 ]; then
+        display "info" "Fixing vm.overcommit_memory..."
+
+        sudo sysctl -w vm.overcommit_memory=1
+
+        if ! grep -q "vm.overcommit_memory" /etc/sysctl.conf; then
+            echo "vm.overcommit_memory = 1" | sudo tee -a /etc/sysctl.conf
+        else
+            sudo sed -i 's/^vm.overcommit_memory.*/vm.overcommit_memory = 1/' /etc/sysctl.conf
+        fi
+
+        sudo sysctl -p
+
+        display "success" "vm.overcommit_memory set to 1"
+    else
+        display "success" "vm.overcommit_memory already set"
+    fi
+}

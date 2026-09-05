@@ -1,108 +1,163 @@
 #!/bin/bash
 
-function install_docker() {
-    set -e  # Exit on any error
-    set -x  # Enable debug mode
-
-    # Update package list
-    if ! sudo apt update; then
-        display "error" "Failed to update package list"
-        exit 1
+# Run docker as the login user. If this session is not yet in the docker
+# group, fall back to sudo docker (passwordless on typical EC2 ubuntu).
+function run_docker() {
+    if docker info >/dev/null 2>&1; then
+        docker "$@"
+    else
+        sudo docker "$@"
     fi
-
-    # Install Docker
-    if ! sudo apt install docker.io -y; then
-        display "error" "Failed to install Docker"
-        exit 1
-    fi
-
-    # Start and enable Docker service
-    if ! sudo systemctl start docker || ! sudo systemctl enable docker; then
-        display "error" "Failed to start or enable Docker service"
-        exit 1
-    fi
-
-    # Add the current user to the docker group
-    if ! sudo usermod -aG docker $USER; then
-        display "error" "Failed to add user to Docker group"
-        exit 1
-    fi
-
-    newgrp docker;
-
-    # Test Docker installation
-    if ! docker --version; then
-        display "error" "Docker installation failed"
-        exit 1
-    fi
-
-    set +x  # Disable debug mode
-
-    display "success" "Docker Installation Done"
 }
 
-function install_docker_compose() {
-    set -e  # Exit on any error
-    set -x  # Enable debug mode
+# Prefer Compose V2 plugin (`docker compose`), fall back to `docker-compose`.
+function run_compose() {
+    if docker info >/dev/null 2>&1; then
+        if docker compose version >/dev/null 2>&1; then
+            docker compose "$@"
+            return
+        fi
+        if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose "$@"
+            return
+        fi
+    fi
 
-    # Install Docker Compose
-    if ! sudo curl -L "https://github.com/docker/compose/releases/download/$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d'"' -f4)/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose; then
-        display "error" "Failed to download Docker Compose"
+    if sudo docker info >/dev/null 2>&1; then
+        if sudo docker compose version >/dev/null 2>&1; then
+            sudo docker compose "$@"
+            return
+        fi
+        if command -v docker-compose >/dev/null 2>&1; then
+            sudo docker-compose "$@"
+            return
+        fi
+    fi
+
+    display "error" "Docker Compose is not installed or Docker is not running"
+    return 1
+}
+
+function compose_files() {
+    echo -n "-f docker-compose.yml"
+}
+
+function install_docker_and_compose() {
+    local target_user
+    target_user="$(get_login_user)"
+
+    if ! sudo apt update; then
+        display "error" "Failed to update package list"
+        return 1
+    fi
+
+    if ! sudo apt install -y docker.io docker-compose; then
+        display "error" "Failed to install Docker"
+        return 1
+    fi
+
+    if ! sudo systemctl enable docker; then
+        display "error" "Failed to enable Docker service"
+        return 1
+    fi
+
+    if ! sudo systemctl start docker; then
+        display "error" "Failed to start Docker service"
+        return 1
+    fi
+
+    if ! sudo usermod -aG docker "$target_user"; then
+        display "error" "Failed to add user ${target_user} to Docker group"
+        return 1
+    fi
+
+    if ! sudo docker --version; then
+        display "error" "Docker installation failed"
+        return 1
+    fi
+
+    display "success" "Docker Installation Done"
+    display "info" "User '${target_user}' was added to the docker group. This session still uses sudo docker until you log out and back in. After re-login, docker runs as ${target_user} without sudo."
+    display "info" "Compose: \`docker compose\` (V2 plugin) is preferred when available; \`docker-compose\` is used as fallback."
+}
+
+# True when this project's Redis container is already bound to REDIS_PORT.
+function container_owns_port() {
+    local container_name="${ENV}_${APP_NAME}_redis"
+    local port_map
+
+    if [ "$(run_docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || echo false)" != "true" ]; then
+        return 1
+    fi
+
+    port_map="$(run_docker port "$container_name" 6379 2>/dev/null || true)"
+    if [ -z "$port_map" ]; then
+        return 1
+    fi
+
+    # Matches "0.0.0.0:6379" or "127.0.0.1:6379"
+    echo "$port_map" | grep -qE ":${REDIS_PORT}$"
+}
+
+function ensure_redis_port_available() {
+    if [ -z "${REDIS_PORT:-}" ]; then
+        display "error" "REDIS_PORT is not set in .env"
         exit 1
     fi
 
-    if ! sudo chmod +x /usr/local/bin/docker-compose; then
-        display "error" "Failed to set executable permissions for Docker Compose"
+    if (echo >/dev/tcp/localhost/"${REDIS_PORT}") >/dev/null 2>&1; then
+        if container_owns_port; then
+            display "info" "Port ${REDIS_PORT} is in use by this project's Redis container; Compose will recreate as needed."
+            return 0
+        fi
+        display "error" "Port ${REDIS_PORT} is already in use. Please choose a different port or stop the service using this port."
         exit 1
     fi
-
-    # Test Docker Compose installation
-    if ! docker-compose --version; then
-        display "error" "Docker Compose installation failed"
-        exit 1
-    fi
-
-    set +x  # Disable debug mode
-
-    display "success" "Docker Compose Installation Done"
+    display "success" "Port ${REDIS_PORT} is available."
 }
 
 function docker_compose_up() {
-    # Check if the port is already in use
-    if (echo >/dev/tcp/localhost/${CONTAINER_PORT}) >/dev/null 2>&1; then
-        echo "❌ Port ${CONTAINER_PORT} is already in use. Please choose a different port or stop the service using this port."
-        exit 1
-    else
-        echo "✅ Port ${CONTAINER_PORT} is available."
-    fi
-    
-    # Build and start the containers
-    local compose_file="-f docker-compose.yml"
-    if [ "${ENABLE_CRON}" = "true" ]; then
-        compose_file="${compose_file} -f docker-compose.cron.yml"
-    fi
-    if [ "${ENABLE_JOB}" = "true" ]; then
-        compose_file="${compose_file} -f docker-compose.job.yml"
-    fi
+    ensure_redis_port_available
 
-    display "info" "Executing: docker-compose ${compose_file} up"
+    local files
+    files="$(compose_files)"
 
-    docker-compose ${compose_file} build --no-cache
-    docker-compose ${compose_file} up -d
+    display "info" "Executing: docker compose ${files} up -d"
+
+    # Pull only if image tag may have changed; recreate is a separate menu option.
+    # shellcheck disable=SC2086
+    run_compose ${files} up -d --remove-orphans
+}
+
+# Force recreate after redis.conf / .env memory/password/version changes.
+# Does not delete ./data (bind mount) or named volumes.
+function docker_compose_recreate() {
+    ensure_redis_port_available
+
+    local files
+    files="$(compose_files)"
+
+    display "info" "Executing: docker compose ${files} pull + up --force-recreate"
+
+    # shellcheck disable=SC2086
+    run_compose ${files} pull
+    # shellcheck disable=SC2086
+    run_compose ${files} up -d --remove-orphans --force-recreate
 }
 
 function docker_compose_down() {
+    local files
+    files="$(compose_files)"
 
-    # Stop all containers
-    local compose_file="-f docker-compose.yml"
-    if [ "${ENABLE_CRON}" = "true" ]; then
-        compose_file="${compose_file} -f docker-compose.cron.yml"
-    fi
-    if [ "${ENABLE_JOB}" = "true" ]; then
-        compose_file="${compose_file} -f docker-compose.job.yml"
-    fi
+    display "info" "Executing: docker compose ${files} down"
 
-    display "info" "Executing: docker-compose ${compose_file} down"
+    # Stop this project's containers. Do not delete images or volumes
+    # (unsafe on production — Redis data lives under ./data).
+    # shellcheck disable=SC2086
+    run_compose ${files} down --remove-orphans
+}
 
-    docker-compose ${compose_file} down --rmi all --volumes
+function prune_unused_docker_images() {
+    run_docker image prune -a -f
+    display "success" "Unused Docker images were deleted"
 }

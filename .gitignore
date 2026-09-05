@@ -1,3 +1,7 @@
 .env
 data/
 *.log
+.idea/
+.DS_Store
+*.swp
+*~

@@ -1,82 +1,84 @@
 #!/bin/bash
+set -euo pipefail
+
 source ./bash/utility.sh
 source ./bash/docker.sh
 source ./bash/nginx.sh
 
-    # Get the ENV from the .env file
-    read_env_file
+read_env_file
+show_project_context
 
-    automation_options=(
-        "Install Docker"                            #0
-        "Install Docker Compose"                    #1
-        "Docker Compose Up"                         #2
-        "Docker Compose Down"                       #3
-        "Docker PS"                                 #4
-        "Goto Bash"                                 #5
-        "Delete All Unused Docker Images"           #6
-        "Set Swap Memory"                           #7
-        "Create NGINX Server Block"                 #8
-        "Delete NGINX Server Block"                 #9
-        "Quit"                                      #10
-    )
+automation_options=(
+    "Install Docker & Docker Compose"
+    "Docker Compose Up"
+    "Docker Compose Recreate (pull + force-recreate)"
+    "Docker Compose Down"
+    "Docker PS"
+    "Goto Bash"
+    "Delete All Unused Docker Images"
+    "Set Swap Memory"
+    "Create NGINX Server Block"
+    "Delete NGINX Server Block"
+    "Quit"
+)
 
-    show_heading "Select Your Automation Option: "
-    selected_automation=$(get_selection "${automation_options[@]}")
+show_heading "Select Your Automation Option"
+selected_automation=$(get_selection "${automation_options[@]}")
 
-    if [ "$selected_automation" = "${automation_options[0]}" ]; then
-        # Install Docker and Docker Compose
-        install_docker
-    elif [ "$selected_automation" = "${automation_options[1]}" ]; then
-        install_docker_compose
-    elif [ "$selected_automation" = "${automation_options[2]}" ]; then
+# Echo selection so logs/screenshots show what ran
+if [ -n "$selected_automation" ] && [ "$selected_automation" != "Quit" ]; then
+    show_heading "$selected_automation"
+fi
 
-        # Fix Redis memory warning
+case "$selected_automation" in
+    "Install Docker & Docker Compose")
+        install_docker_and_compose
+        ;;
+    "Docker Compose Up")
         fix_memory_overcommit
-
         install_nginx_if_not_installed
-
-        # call function docker->docker_compose_down to stop all containers
-        docker_compose_down
-
-        display "info" "ENV File: ===================START================"
-        cat .env
-        display "info" "ENV File: ====================END================="
-
-        # call function docker->docker_compose_up to start all containers
         docker_compose_up
-
-        # Display the status of the containers
-        docker ps
-
-    elif [ "$selected_automation" = "${automation_options[3]}" ]; then
-        # call function docker->docker_compose_down to stop all containers
+        run_docker ps
+        ;;
+    "Docker Compose Recreate (pull + force-recreate)")
+        fix_memory_overcommit
+        install_nginx_if_not_installed
+        docker_compose_recreate
+        run_docker ps
+        ;;
+    "Docker Compose Down")
         docker_compose_down
-    elif [ "$selected_automation" = "${automation_options[4]}" ]; then
-        docker ps
-    elif [ "$selected_automation" = "${automation_options[5]}" ]; then
-
-        # Construct the container name
+        ;;
+    "Docker PS")
+        run_docker ps
+        ;;
+    "Goto Bash")
         CONTAINER_NAME="${ENV}_${APP_NAME}_redis"
-
-        # Enter the bash terminal of the PHP container
-        if docker ps -q -f name=$CONTAINER_NAME | grep -q .; then
-            docker exec -u 0 -it $CONTAINER_NAME bash
+        if [ "$(run_docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || echo false)" = "true" ]; then
+            display "info" "Opening shell as root in ${CONTAINER_NAME}"
+            # alpine images use sh; debian-based redis images also provide sh
+            run_docker exec -u 0 -it "$CONTAINER_NAME" sh
         else
-            echo "Error: Container $CONTAINER_NAME is not running"
+            display "error" "Container ${CONTAINER_NAME} is not running"
         fi
-    elif [ "$selected_automation" = "${automation_options[6]}" ]; then
-        # Delete all unused Docker images
-        docker image prune -a
-        docker system prune --volumes
-        display "success" "All unused Docker images and volumes were deleted"
-    elif [ "$selected_automation" = "${automation_options[7]}" ]; then
-        #    Set Swap Memory
+        ;;
+    "Delete All Unused Docker Images")
+        prune_unused_docker_images
+        ;;
+    "Set Swap Memory")
         setup_swap_memory
-    elif [ "$selected_automation" = "${automation_options[8]}" ]; then
-        # Add NGINX Server Block
+        ;;
+    "Create NGINX Server Block")
         set_up_host_machine_nginx
-    elif [ "$selected_automation" = "${automation_options[9]}" ]; then
-        # Delete NGINX Server Block
+        ;;
+    "Delete NGINX Server Block")
         remove_host_machine_nginx
-    fi
-
+        ;;
+    "Quit"|"")
+        display "info" "Bye."
+        ;;
+    *)
+        display "error" "Unknown option: ${selected_automation}"
+        exit 1
+        ;;
+esac
